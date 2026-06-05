@@ -2,50 +2,44 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Task extends Model
 {
-    use HasFactory;
+    use HasFactory, HasUuids;
 
-    /**
-     * Medan yang boleh diisi secara massal (mass assignment).
-     *
-     * @var array<int, string>
-     */
     protected $fillable = [
-        'user_id',
+        'project_id',
+        'assignee_user_id',
+        'created_by_user_id',
         'title',
         'description',
         'status',
+        'priority',
         'label',
-        'due_date',
         'progress',
+        'due_date',
     ];
 
-    /**
-     * Cast tipe data untuk atribut tertentu.
-     *
-     * @var array<string, string>
-     */
-    protected $casts = [
-        'due_date'   => 'date:Y-m-d',
-        'progress'   => 'integer',
-        'created_at' => 'datetime',
-        'updated_at' => 'datetime',
-    ];
-
-    // ─────────────────────────────────────────────
-    // Relationships
-    // ─────────────────────────────────────────────
-
-    /**
-     * Task ini dimiliki oleh satu User.
-     */
-    public function user(): BelongsTo
+    public function project()
     {
-        return $this->belongsTo(User::class);
+        return $this->belongsTo(Project::class);
+    }
+
+    public function assignee()
+    {
+        return $this->belongsTo(User::class, 'assignee_user_id');
+    }
+
+    public function creator()
+    {
+        return $this->belongsTo(User::class, 'created_by_user_id');
+    }
+
+    public function links()
+    {
+        return $this->hasMany(TaskLink::class);
     }
 }

@@ -4,16 +4,15 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Task;
+use App\Models\Project;
+use App\Models\TaskLink;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Carbon\Carbon;
 
 class TaskController extends Controller
 {
-    // ──────────────────────────────────────────────────────────────────
-    // HELPER — Format respons JSON yang konsisten (sama seperti Auth)
-    // ──────────────────────────────────────────────────────────────────
-
     private function successResponse(string $message, mixed $data = [], int $code = 200): JsonResponse
     {
         return response()->json([
@@ -38,17 +37,10 @@ class TaskController extends Controller
         ], $code);
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // READ — GET /api/tasks
-    // Ambil semua task milik user yang sedang login
-    // Query params: ?search=, ?status=, ?label=
-    // ──────────────────────────────────────────────────────────────────
-
     public function index(Request $request): JsonResponse
     {
-        $query = Task::where('user_id', auth()->id());
+        $query = Task::with('links')->where('assignee_user_id', auth()->id());
 
-        // Filter: carian teks pada tajuk / deskripsi
         if ($request->filled('search')) {
             $search = $request->search;
             $query->where(function ($q) use ($search) {
@@ -57,25 +49,21 @@ class TaskController extends Controller
             });
         }
 
-        // Filter: status ('Belum Selesai' | 'Berjalan' | 'Selesai')
         if ($request->filled('status')) {
             $query->where('status', $request->status);
         }
 
-        // Filter: label / mata kuliah
         if ($request->filled('label')) {
             $query->where('label', $request->label);
         }
 
-        // Urutkan: task terbaru di atas
         $tasks = $query->orderBy('created_at', 'desc')->get();
 
-        // Ringkasan statistik untuk dashboard
         $summary = [
-            'total'         => $tasks->count(),
-            'belum_selesai' => $tasks->where('status', 'Belum Selesai')->count(),
-            'berjalan'      => $tasks->where('status', 'Berjalan')->count(),
-            'selesai'       => $tasks->where('status', 'Selesai')->count(),
+            'total'   => $tasks->count(),
+            'belum'   => $tasks->where('status', 'belum')->count(),
+            'berjalan'=> $tasks->where('status', 'berjalan')->count(),
+            'selesai' => $tasks->where('status', 'selesai')->count(),
         ];
 
         return $this->successResponse('Tasks fetched successfully.', [
@@ -84,15 +72,10 @@ class TaskController extends Controller
         ]);
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // READ — GET /api/tasks/{id}
-    // Ambil detail satu task (hanya milik user sendiri)
-    // ──────────────────────────────────────────────────────────────────
-
-    public function show(int $id): JsonResponse
+    public function show(string $id): JsonResponse
     {
-        $task = Task::where('id', $id)
-                    ->where('user_id', auth()->id())
+        $task = Task::with('links')->where('id', $id)
+                    ->where('assignee_user_id', auth()->id())
                     ->first();
 
         if (!$task) {
@@ -102,48 +85,70 @@ class TaskController extends Controller
         return $this->successResponse('Task fetched successfully.', ['task' => $task]);
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // CREATE — POST /api/tasks
-    // Tambah task baru
-    // ──────────────────────────────────────────────────────────────────
-
     public function store(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
+            'project_id'  => 'nullable|uuid|exists:projects,id',
             'title'       => 'required|string|max:255',
             'description' => 'nullable|string',
-            'status'      => 'nullable|in:Belum Selesai,Berjalan,Selesai',
+            'status'      => 'nullable|in:belum,berjalan,selesai',
+            'priority'    => 'nullable|in:rendah,sedang,tinggi',
             'label'       => 'nullable|string|max:100',
             'due_date'    => 'nullable|date|date_format:Y-m-d',
             'progress'    => 'nullable|integer|min:0|max:100',
+            'links'       => 'nullable|array',
+            'links.*.label' => 'nullable|string',
+            'links.*.url'   => 'required|url',
         ]);
 
         if ($validator->fails()) {
             return $this->errorResponse('Validasi gagal.', $validator->errors(), 422);
+        }
+
+        // Validasi deadline project jika project_id != null
+        if ($request->project_id && $request->due_date) {
+            $project = Project::find($request->project_id);
+            if ($project && $project->deadline_date) {
+                $projectDeadline = Carbon::parse($project->deadline_date);
+                $taskDeadline = Carbon::parse($request->due_date);
+                
+                // Task deadline cannot exceed H-1 of project deadline
+                if ($taskDeadline->greaterThanOrEqualTo($projectDeadline)) {
+                    return $this->errorResponse('Validasi gagal.', ['due_date' => ['Task due date must be at least 1 day before the project deadline.']], 422);
+                }
+            }
         }
 
         $task = Task::create([
-            'user_id'     => auth()->id(),
-            'title'       => $request->title,
-            'description' => $request->description,
-            'status'      => $request->status ?? 'Belum Selesai',
-            'label'       => $request->label,
-            'due_date'    => $request->due_date,
-            'progress'    => $request->progress ?? 0,
+            'project_id'         => $request->project_id,
+            'assignee_user_id'   => auth()->id(),
+            'created_by_user_id' => auth()->id(),
+            'title'              => $request->title,
+            'description'        => $request->description,
+            'status'             => $request->status ?? 'belum',
+            'priority'           => $request->priority ?? 'sedang',
+            'label'              => $request->label,
+            'due_date'           => $request->due_date,
+            'progress'           => $request->progress ?? 0,
         ]);
 
-        return $this->successResponse('Task berhasil ditambahkan.', ['task' => $task], 201);
+        if ($request->has('links') && is_array($request->links)) {
+            foreach ($request->links as $link) {
+                TaskLink::create([
+                    'task_id' => $task->id,
+                    'label' => $link['label'] ?? null,
+                    'url' => $link['url'],
+                ]);
+            }
+        }
+
+        return $this->successResponse('Task berhasil ditambahkan.', ['task' => $task->load('links')], 201);
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // UPDATE (Full Edit) — PUT /api/tasks/{id}
-    // Edit semua butiran task
-    // ──────────────────────────────────────────────────────────────────
-
-    public function update(Request $request, int $id): JsonResponse
+    public function update(Request $request, string $id): JsonResponse
     {
         $task = Task::where('id', $id)
-                    ->where('user_id', auth()->id())
+                    ->where('assignee_user_id', auth()->id())
                     ->first();
 
         if (!$task) {
@@ -151,34 +156,62 @@ class TaskController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
+            'project_id'  => 'nullable|uuid|exists:projects,id',
             'title'       => 'sometimes|required|string|max:255',
             'description' => 'nullable|string',
-            'status'      => 'nullable|in:Belum Selesai,Berjalan,Selesai',
+            'status'      => 'nullable|in:belum,berjalan,selesai',
+            'priority'    => 'nullable|in:rendah,sedang,tinggi',
             'label'       => 'nullable|string|max:100',
             'due_date'    => 'nullable|date|date_format:Y-m-d',
             'progress'    => 'nullable|integer|min:0|max:100',
+            'links'       => 'nullable|array',
+            'links.*.label' => 'nullable|string',
+            'links.*.url'   => 'required|url',
         ]);
 
         if ($validator->fails()) {
             return $this->errorResponse('Validasi gagal.', $validator->errors(), 422);
         }
 
+        $projectId = $request->has('project_id') ? $request->project_id : $task->project_id;
+        $dueDate = $request->has('due_date') ? $request->due_date : $task->due_date;
+
+        if ($projectId && $dueDate) {
+            $project = Project::find($projectId);
+            if ($project && $project->deadline_date) {
+                $projectDeadline = Carbon::parse($project->deadline_date);
+                $taskDeadline = Carbon::parse($dueDate);
+                
+                if ($taskDeadline->greaterThanOrEqualTo($projectDeadline)) {
+                    return $this->errorResponse('Validasi gagal.', ['due_date' => ['Task due date must be at least 1 day before the project deadline.']], 422);
+                }
+            }
+        }
+
         $task->update($request->only([
-            'title', 'description', 'status', 'label', 'due_date', 'progress',
+            'project_id', 'title', 'description', 'status', 'priority', 'label', 'due_date', 'progress',
         ]));
 
-        return $this->successResponse('Task berhasil diperbarui.', ['task' => $task->fresh()]);
+        if ($request->has('links')) {
+            $task->links()->delete();
+            if (is_array($request->links)) {
+                foreach ($request->links as $link) {
+                    TaskLink::create([
+                        'task_id' => $task->id,
+                        'label' => $link['label'] ?? null,
+                        'url' => $link['url'],
+                    ]);
+                }
+            }
+        }
+
+        return $this->successResponse('Task berhasil diperbarui.', ['task' => $task->fresh('links')]);
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // UPDATE STATUS — PATCH /api/tasks/{id}/status
-    // Ubah status sahaja: 'Belum Selesai' → 'Berjalan' → 'Selesai'
-    // ──────────────────────────────────────────────────────────────────
-
-    public function updateStatus(Request $request, int $id): JsonResponse
+    public function updateStatus(Request $request, string $id): JsonResponse
     {
         $task = Task::where('id', $id)
-                    ->where('user_id', auth()->id())
+                    ->where('assignee_user_id', auth()->id())
                     ->first();
 
         if (!$task) {
@@ -186,18 +219,17 @@ class TaskController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
-            'status' => 'required|in:Belum Selesai,Berjalan,Selesai',
+            'status' => 'required|in:belum,berjalan,selesai',
         ]);
 
         if ($validator->fails()) {
             return $this->errorResponse('Validasi gagal.', $validator->errors(), 422);
         }
 
-        // Auto-set progress berdasarkan status
         $progressMap = [
-            'Belum Selesai' => 0,
-            'Berjalan'      => 50,
-            'Selesai'       => 100,
+            'belum'   => 0,
+            'berjalan'=> 50,
+            'selesai' => 100,
         ];
 
         $task->update([
@@ -207,19 +239,14 @@ class TaskController extends Controller
 
         return $this->successResponse(
             "Status task diubah menjadi '{$request->status}'.",
-            ['task' => $task->fresh()]
+            ['task' => $task->fresh('links')]
         );
     }
 
-    // ──────────────────────────────────────────────────────────────────
-    // DELETE — DELETE /api/tasks/{id}
-    // Hapus task
-    // ──────────────────────────────────────────────────────────────────
-
-    public function destroy(int $id): JsonResponse
+    public function destroy(string $id): JsonResponse
     {
         $task = Task::where('id', $id)
-                    ->where('user_id', auth()->id())
+                    ->where('assignee_user_id', auth()->id())
                     ->first();
 
         if (!$task) {
