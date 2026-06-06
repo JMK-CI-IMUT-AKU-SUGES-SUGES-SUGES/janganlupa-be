@@ -1,11 +1,14 @@
 <?php
 
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\UserController;
-use App\Http\Controllers\Api\TaskController;   // ← Tambah import ini
+use App\Http\Controllers\Api\TaskController;
+use App\Http\Controllers\Api\ProjectController;
+use App\Http\Controllers\Api\PartnerRelationController;
+use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\CalendarController;
 
 /*
 |--------------------------------------------------------------------------
@@ -29,6 +32,7 @@ Route::middleware('auth:api')->group(function () {
     Route::get('/me',      [UserController::class, 'me']);
     Route::put('/profile', [UserController::class, 'updateProfile']);
     Route::post('/logout', [AuthController::class, 'logout']);
+    Route::post('/refresh', [AuthController::class, 'refresh']);
 
     // ── Task CRUD ───────────────────────────────────────────
     Route::get('/tasks',                    [TaskController::class, 'index']);
@@ -39,23 +43,23 @@ Route::middleware('auth:api')->group(function () {
     Route::delete('/tasks/{id}',            [TaskController::class, 'destroy']);
 
     // ── Project CRUD ────────────────────────────────────────
-    Route::get('/projects',                 [\App\Http\Controllers\Api\ProjectController::class, 'index']);
-    Route::post('/projects',                [\App\Http\Controllers\Api\ProjectController::class, 'store']);
-    Route::get('/projects/{id}',            [\App\Http\Controllers\Api\ProjectController::class, 'show']);
-    Route::put('/projects/{id}',            [\App\Http\Controllers\Api\ProjectController::class, 'update']);
-    Route::delete('/projects/{id}',         [\App\Http\Controllers\Api\ProjectController::class, 'destroy']);
-    Route::post('/projects/{id}/members',   [\App\Http\Controllers\Api\ProjectController::class, 'addMember']);
-    Route::delete('/projects/{id}/members/{user_id}', [\App\Http\Controllers\Api\ProjectController::class, 'removeMember']);
+    Route::get('/projects',                 [ProjectController::class, 'index']);
+    Route::post('/projects',                [ProjectController::class, 'store']);
+    Route::get('/projects/{id}',            [ProjectController::class, 'show']);
+    Route::put('/projects/{id}',            [ProjectController::class, 'update']);
+    Route::delete('/projects/{id}',         [ProjectController::class, 'destroy']);
+    Route::post('/projects/{id}/members',   [ProjectController::class, 'addMember']);
+    Route::delete('/projects/{id}/members/{user_id}', [ProjectController::class, 'removeMember']);
 
     // ── Partner Relations ───────────────────────────────────
-    Route::get('/partners',                       [\App\Http\Controllers\Api\PartnerRelationController::class, 'index']);
-    Route::get('/partners/requests',              [\App\Http\Controllers\Api\PartnerRelationController::class, 'requests']);
-    Route::post('/partners/request',              [\App\Http\Controllers\Api\PartnerRelationController::class, 'sendRequest']);
-    Route::put('/partners/requests/{id}',         [\App\Http\Controllers\Api\PartnerRelationController::class, 'respondRequest']);
-    Route::delete('/partners/{id}',               [\App\Http\Controllers\Api\PartnerRelationController::class, 'destroy']);
+    Route::get('/partners',                       [PartnerRelationController::class, 'index']);
+    Route::get('/partners/requests',              [PartnerRelationController::class, 'requests']);
+    Route::post('/partners/request',              [PartnerRelationController::class, 'sendRequest']);
+    Route::put('/partners/requests/{id}',         [PartnerRelationController::class, 'respondRequest']);
+    Route::delete('/partners/{id}',               [PartnerRelationController::class, 'destroy']);
 
     // ── Aggregation ─────────────────────────────────────────
-    Route::get('/dashboard',                      [\App\Http\Controllers\Api\DashboardController::class, 'index']);
-    Route::get('/calendar',                       [\App\Http\Controllers\Api\CalendarController::class, 'index']);
+    Route::get('/dashboard',                      [DashboardController::class, 'index']);
+    Route::get('/calendar',                       [CalendarController::class, 'index']);
 
 });

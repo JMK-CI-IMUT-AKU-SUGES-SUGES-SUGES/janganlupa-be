@@ -37,15 +37,52 @@ class TaskController extends Controller
         ], $code);
     }
 
+    private function isProjectManager(?Project $project): bool
+    {
+        if (!$project) {
+            return false;
+        }
+
+        return $project->members()
+            ->where('user_id', auth('api')->id())
+            ->whereIn('role', ['owner', 'admin'])
+            ->exists();
+    }
+
+    private function canManageTask(Task $task): bool
+    {
+        if ($task->assignee_user_id === auth('api')->id()) {
+            return true;
+        }
+
+        if (!$task->project_id) {
+            return false;
+        }
+
+        $project = $task->relationLoaded('project')
+            ? $task->project
+            : $task->project()->first();
+
+        return $this->isProjectManager($project);
+    }
+
     public function index(Request $request): JsonResponse
     {
-        $query = Task::with('links')->where('assignee_user_id', auth()->id());
+        $query = Task::with(['links', 'assignee', 'project:id,name'])
+            ->where('assignee_user_id', auth('api')->id());
 
         if ($request->filled('search')) {
             $search = $request->search;
             $query->where(function ($q) use ($search) {
                 $q->where('title', 'like', "%{$search}%")
-                  ->orWhere('description', 'like', "%{$search}%");
+                  ->orWhere('description', 'like', "%{$search}%")
+                  ->orWhere('label', 'like', "%{$search}%")
+                  ->orWhereHas('project', function ($projectQuery) use ($search) {
+                      $projectQuery->where('name', 'like', "%{$search}%");
+                  })
+                  ->orWhereHas('assignee', function ($assigneeQuery) use ($search) {
+                      $assigneeQuery->where('name', 'like', "%{$search}%");
+                  });
             });
         }
 
@@ -55,6 +92,10 @@ class TaskController extends Controller
 
         if ($request->filled('label')) {
             $query->where('label', $request->label);
+        }
+
+        if ($request->filled('project_id')) {
+            $query->where('project_id', $request->project_id);
         }
 
         $tasks = $query->orderBy('created_at', 'desc')->get();
@@ -74,12 +115,14 @@ class TaskController extends Controller
 
     public function show(string $id): JsonResponse
     {
-        $task = Task::with('links')->where('id', $id)
-                    ->where('assignee_user_id', auth()->id())
-                    ->first();
+        $task = Task::with(['links', 'project'])->find($id);
 
         if (!$task) {
             return $this->errorResponse('Task tidak ditemukan.', [], 404);
+        }
+
+        if (!$this->canManageTask($task)) {
+            return $this->errorResponse('Anda tidak punya akses untuk melihat task ini.', [], 403);
         }
 
         return $this->successResponse('Task fetched successfully.', ['task' => $task]);
@@ -89,6 +132,7 @@ class TaskController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'project_id'  => 'nullable|uuid|exists:projects,id',
+            'assignee_user_id' => 'nullable|uuid|exists:users,id',
             'title'       => 'required|string|max:255',
             'description' => 'nullable|string',
             'status'      => 'nullable|in:belum,berjalan,selesai',
@@ -105,9 +149,25 @@ class TaskController extends Controller
             return $this->errorResponse('Validasi gagal.', $validator->errors(), 422);
         }
 
-        // Validasi deadline project jika project_id != null
-        if ($request->project_id && $request->due_date) {
+        $project = null;
+        $assigneeUserId = auth('api')->id();
+
+        if ($request->project_id) {
             $project = Project::find($request->project_id);
+
+            if (!$this->isProjectManager($project)) {
+                return $this->errorResponse('Hanya owner atau admin project yang dapat mengelola task project.', [], 403);
+            }
+
+            $assigneeUserId = $request->assignee_user_id ?: auth('api')->id();
+
+            if (!$project->members()->where('user_id', $assigneeUserId)->exists()) {
+                return $this->errorResponse('PIC task harus merupakan member project.', ['assignee_user_id' => ['User belum tergabung dalam project ini.']], 422);
+            }
+        }
+
+        // Validasi deadline project jika project_id != null
+        if ($project && $request->due_date) {
             if ($project && $project->deadline_date) {
                 $projectDeadline = Carbon::parse($project->deadline_date);
                 $taskDeadline = Carbon::parse($request->due_date);
@@ -121,8 +181,8 @@ class TaskController extends Controller
 
         $task = Task::create([
             'project_id'         => $request->project_id,
-            'assignee_user_id'   => auth()->id(),
-            'created_by_user_id' => auth()->id(),
+            'assignee_user_id'   => $assigneeUserId,
+            'created_by_user_id' => auth('api')->id(),
             'title'              => $request->title,
             'description'        => $request->description,
             'status'             => $request->status ?? 'belum',
@@ -133,30 +193,34 @@ class TaskController extends Controller
         ]);
 
         if ($request->has('links') && is_array($request->links)) {
-            foreach ($request->links as $link) {
+            foreach ($request->links as $index => $link) {
                 TaskLink::create([
                     'task_id' => $task->id,
                     'label' => $link['label'] ?? null,
                     'url' => $link['url'],
+                    'sort_order' => $index + 1,
                 ]);
             }
         }
 
-        return $this->successResponse('Task berhasil ditambahkan.', ['task' => $task->load('links')], 201);
+        return $this->successResponse('Task berhasil ditambahkan.', ['task' => $task->load(['links', 'assignee', 'project:id,name'])], 201);
     }
 
     public function update(Request $request, string $id): JsonResponse
     {
-        $task = Task::where('id', $id)
-                    ->where('assignee_user_id', auth()->id())
-                    ->first();
+        $task = Task::with('project')->find($id);
 
         if (!$task) {
             return $this->errorResponse('Task tidak ditemukan.', [], 404);
         }
 
+        if (!$this->canManageTask($task)) {
+            return $this->errorResponse('Anda tidak punya akses untuk mengelola task ini.', [], 403);
+        }
+
         $validator = Validator::make($request->all(), [
             'project_id'  => 'nullable|uuid|exists:projects,id',
+            'assignee_user_id' => 'nullable|uuid|exists:users,id',
             'title'       => 'sometimes|required|string|max:255',
             'description' => 'nullable|string',
             'status'      => 'nullable|in:belum,berjalan,selesai',
@@ -175,9 +239,30 @@ class TaskController extends Controller
 
         $projectId = $request->has('project_id') ? $request->project_id : $task->project_id;
         $dueDate = $request->has('due_date') ? $request->due_date : $task->due_date;
+        $project = $projectId ? Project::find($projectId) : null;
+        $projectManager = $this->isProjectManager($project);
+
+        if ($request->has('project_id') && $projectId !== $task->project_id && !$projectManager) {
+            return $this->errorResponse('Hanya owner atau admin project yang dapat memindahkan task ke project.', [], 403);
+        }
+
+        if ($request->has('assignee_user_id') && !$projectManager) {
+            return $this->errorResponse('Hanya owner atau admin project yang dapat mengganti PIC task project.', [], 403);
+        }
+
+        $assigneeUserId = $task->assignee_user_id;
+
+        if ($project) {
+            $assigneeUserId = $request->has('assignee_user_id')
+                ? $request->assignee_user_id
+                : $task->assignee_user_id;
+
+            if (!$project->members()->where('user_id', $assigneeUserId)->exists()) {
+                return $this->errorResponse('PIC task harus merupakan member project.', ['assignee_user_id' => ['User belum tergabung dalam project ini.']], 422);
+            }
+        }
 
         if ($projectId && $dueDate) {
-            $project = Project::find($projectId);
             if ($project && $project->deadline_date) {
                 $projectDeadline = Carbon::parse($project->deadline_date);
                 $taskDeadline = Carbon::parse($dueDate);
@@ -188,34 +273,43 @@ class TaskController extends Controller
             }
         }
 
-        $task->update($request->only([
+        $updateData = $request->only([
             'project_id', 'title', 'description', 'status', 'priority', 'label', 'due_date', 'progress',
-        ]));
+        ]);
+
+        if ($project) {
+            $updateData['assignee_user_id'] = $assigneeUserId;
+        }
+
+        $task->update($updateData);
 
         if ($request->has('links')) {
             $task->links()->delete();
             if (is_array($request->links)) {
-                foreach ($request->links as $link) {
+                foreach ($request->links as $index => $link) {
                     TaskLink::create([
                         'task_id' => $task->id,
                         'label' => $link['label'] ?? null,
                         'url' => $link['url'],
+                        'sort_order' => $index + 1,
                     ]);
                 }
             }
         }
 
-        return $this->successResponse('Task berhasil diperbarui.', ['task' => $task->fresh('links')]);
+        return $this->successResponse('Task berhasil diperbarui.', ['task' => $task->fresh(['links', 'assignee', 'project:id,name'])]);
     }
 
     public function updateStatus(Request $request, string $id): JsonResponse
     {
-        $task = Task::where('id', $id)
-                    ->where('assignee_user_id', auth()->id())
-                    ->first();
+        $task = Task::with('project')->find($id);
 
         if (!$task) {
             return $this->errorResponse('Task tidak ditemukan.', [], 404);
+        }
+
+        if (!$this->canManageTask($task)) {
+            return $this->errorResponse('Anda tidak punya akses untuk mengelola task ini.', [], 403);
         }
 
         $validator = Validator::make($request->all(), [
@@ -239,18 +333,20 @@ class TaskController extends Controller
 
         return $this->successResponse(
             "Status task diubah menjadi '{$request->status}'.",
-            ['task' => $task->fresh('links')]
+            ['task' => $task->fresh(['links', 'assignee', 'project:id,name'])]
         );
     }
 
     public function destroy(string $id): JsonResponse
     {
-        $task = Task::where('id', $id)
-                    ->where('assignee_user_id', auth()->id())
-                    ->first();
+        $task = Task::with('project')->find($id);
 
         if (!$task) {
             return $this->errorResponse('Task tidak ditemukan.', [], 404);
+        }
+
+        if (!$this->canManageTask($task)) {
+            return $this->errorResponse('Anda tidak punya akses untuk mengelola task ini.', [], 403);
         }
 
         $task->delete();

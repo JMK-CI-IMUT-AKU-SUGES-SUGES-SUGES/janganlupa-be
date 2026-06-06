@@ -32,7 +32,7 @@ class ProjectController extends Controller
     public function index(): JsonResponse
     {
         $projects = Project::whereHas('members', function($q) {
-            $q->where('user_id', auth()->id());
+            $q->where('user_id', auth('api')->id());
         })->with(['users', 'links'])->orderBy('created_at', 'desc')->get();
 
         return $this->successResponse('Projects fetched successfully.', ['projects' => $projects]);
@@ -57,21 +57,22 @@ class ProjectController extends Controller
             'name' => $request->name,
             'description' => $request->description,
             'deadline_date' => $request->deadline_date,
-            'created_by_user_id' => auth()->id(),
+            'created_by_user_id' => auth('api')->id(),
         ]);
 
         ProjectMember::create([
             'project_id' => $project->id,
-            'user_id' => auth()->id(),
+            'user_id' => auth('api')->id(),
             'role' => 'owner',
         ]);
 
         if ($request->has('links') && is_array($request->links)) {
-            foreach ($request->links as $link) {
+            foreach ($request->links as $index => $link) {
                 ProjectLink::create([
                     'project_id' => $project->id,
                     'label' => $link['label'] ?? null,
                     'url' => $link['url'],
+                    'sort_order' => $index + 1,
                 ]);
             }
         }
@@ -81,14 +82,14 @@ class ProjectController extends Controller
 
     public function show(string $id): JsonResponse
     {
-        $project = Project::with(['users', 'links', 'tasks'])->find($id);
+        $project = Project::with(['users', 'links', 'tasks.assignee'])->find($id);
 
         if (!$project) {
             return $this->errorResponse('Project tidak ditemukan.', [], 404);
         }
 
         // Check if user is member
-        if (!$project->members()->where('user_id', auth()->id())->exists()) {
+        if (!$project->members()->where('user_id', auth('api')->id())->exists()) {
             return $this->errorResponse('Unauthorized access to project.', [], 403);
         }
 
@@ -101,7 +102,7 @@ class ProjectController extends Controller
 
         if (!$project) return $this->errorResponse('Project tidak ditemukan.', [], 404);
 
-        $member = $project->members()->where('user_id', auth()->id())->first();
+        $member = $project->members()->where('user_id', auth('api')->id())->first();
         if (!$member || $member->role !== 'owner') {
             return $this->errorResponse('Hanya owner yang dapat mengedit project.', [], 403);
         }
@@ -122,11 +123,12 @@ class ProjectController extends Controller
         if ($request->has('links')) {
             $project->links()->delete();
             if (is_array($request->links)) {
-                foreach ($request->links as $link) {
+                foreach ($request->links as $index => $link) {
                     ProjectLink::create([
                         'project_id' => $project->id,
                         'label' => $link['label'] ?? null,
                         'url' => $link['url'],
+                        'sort_order' => $index + 1,
                     ]);
                 }
             }
@@ -141,7 +143,7 @@ class ProjectController extends Controller
 
         if (!$project) return $this->errorResponse('Project tidak ditemukan.', [], 404);
 
-        $member = $project->members()->where('user_id', auth()->id())->first();
+        $member = $project->members()->where('user_id', auth('api')->id())->first();
         if (!$member || $member->role !== 'owner') {
             return $this->errorResponse('Hanya owner yang dapat menghapus project.', [], 403);
         }
@@ -155,19 +157,29 @@ class ProjectController extends Controller
         $project = Project::find($id);
         if (!$project) return $this->errorResponse('Project tidak ditemukan.', [], 404);
 
-        $authMember = $project->members()->where('user_id', auth()->id())->first();
+        $authMember = $project->members()->where('user_id', auth('api')->id())->first();
         if (!$authMember || !in_array($authMember->role, ['owner', 'admin'])) {
             return $this->errorResponse('Hanya owner atau admin yang dapat menambah member.', [], 403);
         }
 
-        $validator = Validator::make($request->all(), [
-            'slug' => 'required|string|exists:users,slug',
+        $payload = $request->only(['slug', 'role']);
+
+        $validator = Validator::make($payload, [
+            'slug' => [
+                'required',
+                'string',
+                function (string $attribute, mixed $value, \Closure $fail): void {
+                    if (!User::findBySlug($value)) {
+                        $fail('User dengan slug tersebut tidak ditemukan.');
+                    }
+                },
+            ],
             'role' => 'required|in:admin,member',
         ]);
 
         if ($validator->fails()) return $this->errorResponse('Validasi gagal.', $validator->errors(), 422);
 
-        $userToAdd = User::where('slug', $request->slug)->first();
+        $userToAdd = User::findBySlug($payload['slug']);
 
         if ($project->members()->where('user_id', $userToAdd->id)->exists()) {
             return $this->errorResponse('User sudah ada di dalam project.', [], 400);
@@ -176,7 +188,7 @@ class ProjectController extends Controller
         ProjectMember::create([
             'project_id' => $project->id,
             'user_id' => $userToAdd->id,
-            'role' => $request->role,
+            'role' => $payload['role'],
         ]);
 
         return $this->successResponse('Member berhasil ditambahkan.', ['project' => $project->fresh(['users'])]);
@@ -187,7 +199,7 @@ class ProjectController extends Controller
         $project = Project::find($id);
         if (!$project) return $this->errorResponse('Project tidak ditemukan.', [], 404);
 
-        $authMember = $project->members()->where('user_id', auth()->id())->first();
+        $authMember = $project->members()->where('user_id', auth('api')->id())->first();
         if (!$authMember || !in_array($authMember->role, ['owner', 'admin'])) {
             return $this->errorResponse('Hanya owner atau admin yang dapat menghapus member.', [], 403);
         }

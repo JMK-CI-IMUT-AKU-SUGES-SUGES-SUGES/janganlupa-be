@@ -11,9 +11,9 @@ class CalendarController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
-        $userId = auth()->id();
+        $userId = auth('api')->id();
 
-        $query = Task::with('project')->where('assignee_user_id', $userId)->whereNotNull('due_date');
+        $query = Task::with(['assignee:id,name', 'project:id,name'])->where('assignee_user_id', $userId)->whereNotNull('due_date');
 
         if ($request->filled('start_date') && $request->filled('end_date')) {
             $query->whereBetween('due_date', [$request->start_date, $request->end_date]);

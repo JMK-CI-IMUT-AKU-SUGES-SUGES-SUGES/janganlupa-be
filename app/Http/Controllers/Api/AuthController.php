@@ -13,9 +13,22 @@ class AuthController extends Controller
 {
     public function register(Request $request)
     {
-        $validator = Validator::make($request->all(), [
+        $payload = $request->all();
+        $payload['slug'] = User::normalizeSlug($payload['slug'] ?? null);
+        $payload['email'] = strtolower(trim((string) ($payload['email'] ?? '')));
+
+        $validator = Validator::make($payload, [
             'name' => 'required|string|max:255',
-            'slug' => 'required|string|max:255|unique:users',
+            'slug' => [
+                'required',
+                'string',
+                'max:255',
+                function (string $attribute, mixed $value, \Closure $fail): void {
+                    if (User::slugExists($value)) {
+                        $fail('Slug sudah digunakan.');
+                    }
+                },
+            ],
             'email' => 'required|string|email|max:255|unique:users',
             'password' => 'required|string|min:6',
         ]);
@@ -25,20 +38,23 @@ class AuthController extends Controller
         }
 
         $user = User::create([
-            'name' => $request->name,
-            'slug' => strtolower($request->slug),
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
+            'name' => $payload['name'],
+            'slug' => $payload['slug'],
+            'email' => $payload['email'],
+            'password' => Hash::make($payload['password']),
         ]);
 
-        $token = auth('api')->login($user);
+        $token = JWTAuth::fromUser($user);
 
-        return $this->respondWithToken($token, 'User created successfully!');
+        return $this->respondWithToken($token, 'User created successfully!', $user);
     }
 
     public function login(Request $request)
     {
-        $validator = Validator::make($request->all(), [
+        $payload = $request->all();
+        $payload['email'] = strtolower(trim((string) ($payload['email'] ?? '')));
+
+        $validator = Validator::make($payload, [
             'email' => 'required|string',
             'password' => 'required|string',
         ]);
@@ -47,18 +63,23 @@ class AuthController extends Controller
             return response()->json($validator->errors(), 400);
         }
 
-        $credentials = $request->only(['email', 'password']);
+        $credentials = [
+            'email' => $payload['email'],
+            'password' => $payload['password'],
+        ];
 
-        if (!$token = auth('api')->attempt($credentials)) {
+        if (!$token = JWTAuth::attempt($credentials)) {
             return response()->json(['error' => 'Unauthorized'], 401);
         }
 
-        return $this->respondWithToken($token, 'User logged in successfully.');
+        $user = User::where('email', $credentials['email'])->first();
+
+        return $this->respondWithToken($token, 'User logged in successfully.', $user);
     }
 
     public function logout()
     {
-        auth('api')->logout();
+        JWTAuth::invalidate(true);
 
         return response()->json([
             'meta' => [
@@ -72,10 +93,10 @@ class AuthController extends Controller
 
     public function refresh()
     {
-        return $this->respondWithToken(auth('api')->refresh(), 'Token refreshed successfully.');
+        return $this->respondWithToken(JWTAuth::refresh(), 'Token refreshed successfully.');
     }
 
-    protected function respondWithToken($token, $message)
+    protected function respondWithToken($token, $message, $user = null)
     {
         return response()->json([
             'meta' => [
@@ -84,11 +105,11 @@ class AuthController extends Controller
                 'message' => $message,
             ],
             'data' => [
-                'user' => auth('api')->user(),
+                'user' => $user ?? JWTAuth::user(),
                 'access_token' => [
                     'token' => $token,
                     'type' => 'bearer',
-                    'expires_in' => auth('api')->factory()->getTTL() * 60,
+                    'expires_in' => config('jwt.ttl') * 60,
                 ],
             ],
         ]);

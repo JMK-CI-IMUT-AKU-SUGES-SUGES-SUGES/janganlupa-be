@@ -30,7 +30,7 @@ class PartnerRelationController extends Controller
     // List partner terhubung (accepted)
     public function index(): JsonResponse
     {
-        $userId = auth()->id();
+        $userId = auth('api')->id();
 
         $relations = PartnerRelation::with(['requester', 'receiver'])
             ->where('status', 'accepted')
@@ -40,7 +40,12 @@ class PartnerRelationController extends Controller
             })->get();
 
         $partners = $relations->map(function ($rel) use ($userId) {
-            return $rel->requester_user_id === $userId ? $rel->receiver : $rel->requester;
+            $partner = $rel->requester_user_id === $userId ? $rel->receiver : $rel->requester;
+
+            return [
+                ...$partner->toArray(),
+                'relation_id' => $rel->id,
+            ];
         })->values();
 
         return $this->successResponse('Partners fetched successfully.', ['partners' => $partners]);
@@ -49,7 +54,7 @@ class PartnerRelationController extends Controller
     // List request (incoming & outgoing pending)
     public function requests(): JsonResponse
     {
-        $userId = auth()->id();
+        $userId = auth('api')->id();
 
         $incoming = PartnerRelation::with('requester')
             ->where('receiver_user_id', $userId)
@@ -70,15 +75,25 @@ class PartnerRelationController extends Controller
     // Request partner
     public function sendRequest(Request $request): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
-            'slug' => 'required|string|exists:users,slug',
+        $payload = $request->only(['slug', 'note']);
+
+        $validator = Validator::make($payload, [
+            'slug' => [
+                'required',
+                'string',
+                function (string $attribute, mixed $value, \Closure $fail): void {
+                    if (!User::findBySlug($value)) {
+                        $fail('User dengan slug tersebut tidak ditemukan.');
+                    }
+                },
+            ],
             'note' => 'nullable|string',
         ]);
 
         if ($validator->fails()) return $this->errorResponse('Validasi gagal.', $validator->errors(), 422);
 
-        $receiver = User::where('slug', $request->slug)->first();
-        $requesterId = auth()->id();
+        $receiver = User::findBySlug($payload['slug']);
+        $requesterId = auth('api')->id();
 
         if ($receiver->id === $requesterId) {
             return $this->errorResponse('Tidak dapat mengirim request ke diri sendiri.', [], 400);
@@ -86,9 +101,13 @@ class PartnerRelationController extends Controller
 
         // Cek apakah sudah ada relasi (pending atau accepted)
         $existing = PartnerRelation::where(function ($q) use ($requesterId, $receiver) {
-            $q->where('requester_user_id', $requesterId)->where('receiver_user_id', $receiver->id);
-        })->orWhere(function ($q) use ($requesterId, $receiver) {
-            $q->where('requester_user_id', $receiver->id)->where('receiver_user_id', $requesterId);
+            $q->where(function ($query) use ($requesterId, $receiver) {
+                $query->where('requester_user_id', $requesterId)
+                    ->where('receiver_user_id', $receiver->id);
+            })->orWhere(function ($query) use ($requesterId, $receiver) {
+                $query->where('requester_user_id', $receiver->id)
+                    ->where('receiver_user_id', $requesterId);
+            });
         })->whereIn('status', ['pending', 'accepted'])->first();
 
         if ($existing) {
@@ -99,7 +118,7 @@ class PartnerRelationController extends Controller
             'requester_user_id' => $requesterId,
             'receiver_user_id' => $receiver->id,
             'status' => 'pending',
-            'note' => $request->note,
+            'note' => $payload['note'] ?? null,
         ]);
 
         return $this->successResponse('Request partner terkirim.', ['relation' => $relation], 201);
@@ -118,7 +137,7 @@ class PartnerRelationController extends Controller
 
         if (!$relation) return $this->errorResponse('Request tidak ditemukan.', [], 404);
 
-        if ($relation->receiver_user_id !== auth()->id()) {
+        if ($relation->receiver_user_id !== auth('api')->id()) {
             return $this->errorResponse('Unauthorized to respond to this request.', [], 403);
         }
 
@@ -140,7 +159,7 @@ class PartnerRelationController extends Controller
         $relation = PartnerRelation::find($id);
         if (!$relation) return $this->errorResponse('Relasi tidak ditemukan.', [], 404);
 
-        $userId = auth()->id();
+        $userId = auth('api')->id();
         if ($relation->requester_user_id !== $userId && $relation->receiver_user_id !== $userId) {
             return $this->errorResponse('Unauthorized to delete this relation.', [], 403);
         }
